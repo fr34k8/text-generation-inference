@@ -1,0 +1,133 @@
+{
+  "details": {
+    "best_of_sequences": null,
+    "finish_reason": "length",
+    "generated_tokens": 20,
+    "prefill": [],
+    "seed": null,
+    "tokens": [
+      {
+        "id": 415,
+        "logprob": -0.039886475,
+        "special": false,
+        "text": " The"
+      },
+      {
+        "id": 12072,
+        "logprob": -0.1430664,
+        "special": false,
+        "text": " cow"
+      },
+      {
+        "id": 349,
+        "logprob": -0.056488037,
+        "special": false,
+        "text": " is"
+      },
+      {
+        "id": 6328,
+        "logprob": -0.6855469,
+        "special": false,
+        "text": " standing"
+      },
+      {
+        "id": 356,
+        "logprob": -0.1685791,
+        "special": false,
+        "text": " on"
+      },
+      {
+        "id": 272,
+        "logprob": -0.50097656,
+        "special": false,
+        "text": " the"
+      },
+      {
+        "id": 10305,
+        "logprob": -0.017303467,
+        "special": false,
+        "text": " beach"
+      },
+      {
+        "id": 304,
+        "logprob": -1.3564453,
+        "special": false,
+        "text": " and"
+      },
+      {
+        "id": 272,
+        "logprob": -0.017868042,
+        "special": false,
+        "text": " the"
+      },
+      {
+        "id": 13088,
+        "logprob": -0.0027103424,
+        "special": false,
+        "text": " chicken"
+      },
+      {
+        "id": 349,
+        "logprob": -0.003156662,
+        "special": false,
+        "text": " is"
+      },
+      {
+        "id": 6398,
+        "logprob": -0.37304688,
+        "special": false,
+        "text": " sitting"
+      },
+      {
+        "id": 356,
+        "logprob": -0.034576416,
+        "special": false,
+        "text": " on"
+      },
+      {
+        "id": 264,
+        "logprob": -0.29418945,
+        "special": false,
+        "text": " a"
+      },
+      {
+        "id": 17972,
+        "logprob": -0.042877197,
+        "special": false,
+        "text": " pile"
+      },
+      {
+        "id": 302,
+        "logprob": -0.00028443336,
+        "special": false,
+        "text": " of"
+      },
+      {
+        "id": 2445,
+        "logprob": -0.023223877,
+        "special": false,
+        "text": " money"
+      },
+      {
+        "id": 28723,
+        "logprob": -0.018157959,
+        "special": false,
+        "text": "."
+      },
+      {
+        "id": 32002,
+        "logprob": -0.00018393993,
+        "special": true,
+        "text": "<end_of_utterance>"
+      },
+      {
+        "id": 2,
+        "logprob": -1.1920929e-07,
+        "special": true,
+        "text": "</s>"
+      }
+    ],
+    "top_tokens": null
+  },
+  "generated_text": " The cow is standing on the beach and the chicken is sitting on a pile of money."
+}

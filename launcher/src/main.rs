@@ -413,6 +413,9 @@ struct Args {
     #[clap(long, env)]
     otlp_endpoint: Option<String>,
 
+    #[clap(default_value = "text-generation-inference.router", long, env)]
+    otlp_service_name: String,
+
     #[clap(long, env)]
     cors_allow_origin: Vec<String>,
     #[clap(long, env)]
@@ -449,6 +452,11 @@ struct Args {
     /// Control the maximum number of inputs that a client can send in a single request
     #[clap(default_value = "4", long, env)]
     max_client_batch_size: usize,
+
+    /// Lora Adapters a list of adapter ids i.e. `repo/adapter1,repo/adapter2` to load during
+    /// startup that will be available to callers via the `adapter_id` field in a request.
+    #[clap(long, env)]
+    lora_adapters: Option<String>,
 }
 
 #[derive(Debug)]
@@ -482,7 +490,9 @@ fn shard_manager(
     max_total_tokens: usize,
     max_batch_size: Option<usize>,
     max_input_tokens: usize,
+    lora_adapters: Option<String>,
     otlp_endpoint: Option<String>,
+    otlp_service_name: String,
     log_level: LevelFilter,
     status_sender: mpsc::Sender<ShardStatus>,
     shutdown: Arc<AtomicBool>,
@@ -548,11 +558,15 @@ fn shard_manager(
         (None, Some(factor)) => Some((RopeScaling::Linear, factor)),
     };
 
-    // OpenTelemetry
+    // OpenTelemetry Endpoint
     if let Some(otlp_endpoint) = otlp_endpoint {
         shard_args.push("--otlp-endpoint".to_string());
         shard_args.push(otlp_endpoint);
     }
+
+    // OpenTelemetry Service Name
+    shard_args.push("--otlp-service-name".to_string());
+    shard_args.push(otlp_service_name);
 
     // In case we use sliding window, we may ignore the sliding in flash for some backends depending on the parameter.
     shard_args.push("--max-input-tokens".to_string());
@@ -592,7 +606,7 @@ fn shard_manager(
 
     // Parse Inference API token
     if let Ok(api_token) = env::var("HF_API_TOKEN") {
-        envs.push(("HUGGING_FACE_HUB_TOKEN".into(), api_token.into()))
+        envs.push(("HF_TOKEN".into(), api_token.into()))
     };
 
     // Detect rope scaling
@@ -610,6 +624,11 @@ fn shard_manager(
     ));
     if let Some(max_batch_size) = max_batch_size {
         envs.push(("MAX_BATCH_SIZE".into(), max_batch_size.to_string().into()));
+    }
+
+    // Lora Adapters
+    if let Some(lora_adapters) = lora_adapters {
+        envs.push(("LORA_ADAPTERS".into(), lora_adapters.into()));
     }
 
     // If huggingface_hub_cache is some, pass it to the shard
@@ -751,7 +770,10 @@ fn shutdown_shards(shutdown: Arc<AtomicBool>, shutdown_receiver: &mpsc::Receiver
 fn num_cuda_devices() -> Option<usize> {
     let devices = match env::var("CUDA_VISIBLE_DEVICES") {
         Ok(devices) => devices,
-        Err(_) => env::var("NVIDIA_VISIBLE_DEVICES").ok()?,
+        Err(_) => match env::var("NVIDIA_VISIBLE_DEVICES") {
+            Ok(devices) => devices,
+            Err(_) => env::var("ZE_AFFINITY_MASK").ok()?,
+        },
     };
     let n_devices = devices.split(',').count();
     Some(n_devices)
@@ -824,9 +846,9 @@ fn find_num_shards(
     let num_shard = match (sharded, num_shard) {
         (Some(true), None) => {
             // try to default to the number of available GPUs
-            tracing::info!("Parsing num_shard from CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES");
+            tracing::info!("Parsing num_shard from CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES/ZE_AFFINITY_MASK");
             let n_devices = num_cuda_devices()
-                .expect("--num-shard and CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES are not set");
+                .expect("--num-shard and CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES/ZE_AFFINITY_MASK are not set");
             if n_devices <= 1 {
                 return Err(LauncherError::NotEnoughCUDADevices(format!(
                     "`sharded` is true but only found {n_devices} CUDA devices"
@@ -876,13 +898,20 @@ enum LauncherError {
     WebserverCannotStart,
 }
 
-fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), LauncherError> {
+fn download_convert_model(
+    model_id: &str,
+    revision: Option<&str>,
+    trust_remote_code: bool,
+    huggingface_hub_cache: Option<&str>,
+    weights_cache_override: Option<&str>,
+    running: Arc<AtomicBool>,
+) -> Result<(), LauncherError> {
     // Enter download tracing span
     let _span = tracing::span!(tracing::Level::INFO, "download").entered();
 
     let mut download_args = vec![
         "download-weights".to_string(),
-        args.model_id.to_string(),
+        model_id.to_string(),
         "--extension".to_string(),
         ".safetensors".to_string(),
         "--logger-level".to_string(),
@@ -891,13 +920,13 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
     ];
 
     // Model optional revision
-    if let Some(revision) = &args.revision {
+    if let Some(revision) = &revision {
         download_args.push("--revision".to_string());
         download_args.push(revision.to_string())
     }
 
     // Trust remote code for automatic peft fusion
-    if args.trust_remote_code {
+    if trust_remote_code {
         download_args.push("--trust-remote-code".to_string());
     }
 
@@ -912,7 +941,7 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
 
     // If huggingface_hub_cache is set, pass it to the download process
     // Useful when running inside a docker container
-    if let Some(ref huggingface_hub_cache) = args.huggingface_hub_cache {
+    if let Some(ref huggingface_hub_cache) = huggingface_hub_cache {
         envs.push(("HUGGINGFACE_HUB_CACHE".into(), huggingface_hub_cache.into()));
     };
 
@@ -925,12 +954,12 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
 
     // Parse Inference API token
     if let Ok(api_token) = env::var("HF_API_TOKEN") {
-        envs.push(("HUGGING_FACE_HUB_TOKEN".into(), api_token.into()))
+        envs.push(("HF_TOKEN".into(), api_token.into()))
     };
 
     // If args.weights_cache_override is some, pass it to the download process
     // Useful when running inside a HuggingFace Inference Endpoint
-    if let Some(weights_cache_override) = &args.weights_cache_override {
+    if let Some(weights_cache_override) = &weights_cache_override {
         envs.push((
             "WEIGHTS_CACHE_OVERRIDE".into(),
             weights_cache_override.into(),
@@ -938,7 +967,7 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
     };
 
     // Start process
-    tracing::info!("Starting download process.");
+    tracing::info!("Starting check and download process for {model_id}");
     let mut download_process = match Command::new("text-generation-server")
         .args(download_args)
         .env_clear()
@@ -980,7 +1009,7 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
     loop {
         if let Some(status) = download_process.try_wait().unwrap() {
             if status.success() {
-                tracing::info!("Successfully downloaded weights.");
+                tracing::info!("Successfully downloaded weights for {model_id}");
                 break;
             }
 
@@ -1035,6 +1064,7 @@ fn spawn_shards(
         let shutdown = shutdown.clone();
         let shutdown_sender = shutdown_sender.clone();
         let otlp_endpoint = args.otlp_endpoint.clone();
+        let otlp_service_name = args.otlp_service_name.clone();
         let quantize = args.quantize;
         let speculate = args.speculate;
         let dtype = args.dtype;
@@ -1048,6 +1078,7 @@ fn spawn_shards(
         let rope_scaling = args.rope_scaling;
         let rope_factor = args.rope_factor;
         let max_batch_size = args.max_batch_size;
+        let lora_adapters = args.lora_adapters.clone();
         thread::spawn(move || {
             shard_manager(
                 model_id,
@@ -1073,7 +1104,9 @@ fn spawn_shards(
                 max_total_tokens,
                 max_batch_size,
                 max_input_tokens,
+                lora_adapters,
                 otlp_endpoint,
+                otlp_service_name,
                 max_log_level,
                 status_sender,
                 shutdown,
@@ -1207,6 +1240,11 @@ fn spawn_webserver(
         router_args.push(otlp_endpoint);
     }
 
+    // OpenTelemetry
+    let otlp_service_name = args.otlp_service_name;
+    router_args.push("--otlp-service-name".to_string());
+    router_args.push(otlp_service_name);
+
     // CORS origins
     for origin in args.cors_allow_origin.into_iter() {
         router_args.push("--cors-allow-origin".to_string());
@@ -1227,7 +1265,7 @@ fn spawn_webserver(
 
     // Parse Inference API token
     if let Ok(api_token) = env::var("HF_API_TOKEN") {
-        envs.push(("HUGGING_FACE_HUB_TOKEN".into(), api_token.into()))
+        envs.push(("HF_TOKEN".into(), api_token.into()))
     };
 
     // Parse Compute type
@@ -1526,7 +1564,28 @@ fn main() -> Result<(), LauncherError> {
     .expect("Error setting Ctrl-C handler");
 
     // Download and convert model weights
-    download_convert_model(&args, running.clone())?;
+    download_convert_model(
+        &args.model_id,
+        args.revision.as_deref(),
+        args.trust_remote_code,
+        args.huggingface_hub_cache.as_deref(),
+        args.weights_cache_override.as_deref(),
+        running.clone(),
+    )?;
+
+    // Download and convert lora adapters if any
+    if let Some(lora_adapters) = &args.lora_adapters {
+        for adapter in lora_adapters.split(',') {
+            download_convert_model(
+                adapter,
+                None,
+                args.trust_remote_code,
+                args.huggingface_hub_cache.as_deref(),
+                args.weights_cache_override.as_deref(),
+                running.clone(),
+            )?;
+        }
+    }
 
     if !running.load(Ordering::SeqCst) {
         // Launcher was asked to stop

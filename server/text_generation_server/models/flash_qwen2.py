@@ -19,6 +19,7 @@ from text_generation_server.utils import (
     weight_files,
     Weights,
 )
+from text_generation_server.utils.import_utils import SYSTEM
 
 tracer = trace.get_tracer(__name__)
 
@@ -37,6 +38,13 @@ class FlashQwen2(BaseFlashMistral):
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")
             dtype = torch.float16 if dtype is None else dtype
+        elif SYSTEM == "ipex":
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                device = torch.device(f"xpu:{rank}")
+                dtype = torch.float16 if dtype is None else dtype
+            else:
+                device = torch.device("cpu")
+                dtype = torch.bfloat16 if dtype is None else dtype
         else:
             raise NotImplementedError("FlashQwen2 is only available on GPU")
 
@@ -62,7 +70,7 @@ class FlashQwen2(BaseFlashMistral):
 
         filenames = weight_files(model_id, revision=revision, extension=".safetensors")
         weights = Weights(filenames, device, dtype, process_group=self.process_group)
-        if config.quantize in ["gptq", "awq"]:
+        if config.quantize in ["gptq", "awq", "marlin"]:
             weights._set_gptq_params(model_id, revision)
 
         model = Qwen2ForCausalLM(config, weights)
@@ -71,6 +79,7 @@ class FlashQwen2(BaseFlashMistral):
 
         torch.distributed.barrier(group=self.process_group)
         super(BaseFlashMistral, self).__init__(
+            model_id=model_id,
             model=model,
             tokenizer=tokenizer,
             num_layers=len(model.model.layers),

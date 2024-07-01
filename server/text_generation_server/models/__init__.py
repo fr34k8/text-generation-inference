@@ -6,13 +6,12 @@ from loguru import logger
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.auto import modeling_auto
 from huggingface_hub import hf_hub_download, HfApi
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 
 from text_generation_server.utils.speculate import get_speculate, set_speculate
 from text_generation_server.models.model import Model
 from text_generation_server.models.causal_lm import CausalLM
-from text_generation_server.models.flash_causal_lm import FlashCausalLM
 from text_generation_server.models.bloom import BLOOMSharded
 from text_generation_server.models.mpt import MPTSharded
 from text_generation_server.models.seq2seq_lm import Seq2SeqLM
@@ -53,6 +52,7 @@ FLASH_ATT_ERROR_MESSAGE = "{} requires Flash Attention enabled models."
 FLASH_ATTENTION = True
 
 try:
+    from text_generation_server.models.flash_causal_lm import FlashCausalLM
     from text_generation_server.models.flash_rw import FlashRWSharded
     from text_generation_server.models.flash_gpt2 import FlashGPT2
     from text_generation_server.models.flash_neox import FlashNeoXSharded
@@ -67,6 +67,9 @@ try:
     )
     from text_generation_server.models.flash_gemma import (
         FlashGemma,
+    )
+    from text_generation_server.models.flash_gemma2 import (
+        FlashGemma2,
     )
     from text_generation_server.models.pali_gemma import (
         PaliGemma,
@@ -89,6 +92,7 @@ except ImportError as e:
     FLASH_ATTENTION = False
 
 if FLASH_ATTENTION:
+    __all__.append(FlashCausalLM)
     __all__.append(FlashGPT2)
     __all__.append(FlashNeoXSharded)
     __all__.append(FlashRWSharded)
@@ -102,6 +106,7 @@ if FLASH_ATTENTION:
     __all__.append(FlashQwen2)
     __all__.append(FlashStarcoder2)
     __all__.append(FlashGemma)
+    __all__.append(FlashGemma2)
     __all__.append(FlashCohere)
 
 MAMBA_AVAILABLE = True
@@ -142,6 +147,11 @@ class ModelType(enum.Enum):
         "type": "gemma",
         "name": "Gemma",
         "url": "https://huggingface.co/google/gemma-7b",
+    }
+    GEMMA2 = {
+        "type": "gemma2",
+        "name": "Gemma2",
+        "url": "https://huggingface.co/google/gemma2-9b",
     }
     COHERE = {
         "type": "cohere",
@@ -196,7 +206,7 @@ class ModelType(enum.Enum):
     QWEN2 = {
         "type": "qwen2",
         "name": "Qwen 2",
-        "url": "https://huggingface.co/bigcode/starcoder2-15b-instruct-v0.1",
+        "url": "https://huggingface.co/collections/Qwen/qwen2-6659360b33528ced941e557f",
     }
     OPT = {
         "type": "opt",
@@ -253,6 +263,7 @@ for data in ModelType:
 
 def get_model(
     model_id: str,
+    lora_adapter_ids: Optional[List[str]],
     revision: Optional[str],
     sharded: bool,
     quantize: Optional[str],
@@ -595,6 +606,7 @@ def get_model(
                 speculator=speculator,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
+                lora_adapter_ids=lora_adapter_ids,
             )
         elif sharded:
             raise NotImplementedError(FLASH_ATT_ERROR_MESSAGE.format("Sharded Llama"))
@@ -619,6 +631,27 @@ def get_model(
             )
         elif sharded:
             raise NotImplementedError(FLASH_ATT_ERROR_MESSAGE.format("Sharded Gemma"))
+        else:
+            return CausalLM(
+                model_id,
+                revision,
+                quantize=quantize,
+                speculator=speculator,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
+    elif model_type == GEMMA2:
+        if FLASH_ATTENTION:
+            return FlashGemma2(
+                model_id,
+                revision,
+                quantize=quantize,
+                speculator=speculator,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
+        elif sharded:
+            raise NotImplementedError(FLASH_ATT_ERROR_MESSAGE.format("Sharded Gemma2"))
         else:
             return CausalLM(
                 model_id,

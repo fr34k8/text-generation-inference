@@ -9,7 +9,7 @@ if SYSTEM == "cuda":
     import rotary_emb
 elif SYSTEM == "rocm":
     from vllm._C import ops
-elif SYSTEM == "xpu":
+elif SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
 
 
@@ -69,7 +69,7 @@ class PositionRotaryEmbedding(nn.Module):
 
             # Inplace operation, updating query and key.
             ops.rotary_embedding(query, key, head_size, cos, sin, True)
-        elif SYSTEM == "xpu":
+        elif SYSTEM == "ipex":
             ipex.llm.functional.rotary_embedding(
                 query, key, sin, cos, query.size(-1), True
             )
@@ -267,19 +267,21 @@ class SuRotaryEmbedding(PositionRotaryEmbedding):
             or self._cos_cached.dtype != dtype
         ):
             self._seq_len_cached = seqlen
-            if seqlen > self.original_max_position_embeddings:
-                inv_freq = self.long_inv_freq
-            else:
-                inv_freq = self.short_inv_freq
-            t = torch.arange(seqlen, device=device, dtype=inv_freq.dtype)
-            if self.scaling_factor is not None:
-                t /= self.scaling_factor
-            # Don't do einsum, it converts fp32 to fp16
-            # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
 
-            freqs = torch.outer(t, inv_freq.to(device=t.device))
-            self._cos_cached = torch.cos(freqs).to(dtype)
-            self._sin_cached = torch.sin(freqs).to(dtype)
+            t = torch.arange(seqlen, device=device, dtype=self.short_inv_freq.dtype)
+            short_freqs = torch.outer(
+                t[: self.original_max_position_embeddings],
+                self.short_inv_freq.to(device=t.device),
+            )
+            long_freqs = torch.outer(
+                t[self.original_max_position_embeddings :],
+                self.long_inv_freq.to(device=t.device),
+            )
+
+            freqs = torch.cat([short_freqs, long_freqs])
+
+            self._cos_cached = (torch.cos(freqs) * self.scaling_factor).to(dtype)
+            self._sin_cached = (torch.sin(freqs) * self.scaling_factor).to(dtype)
 
 
 class DynamicPositionRotaryEmbedding(PositionRotaryEmbedding):

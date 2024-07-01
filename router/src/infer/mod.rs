@@ -7,11 +7,15 @@ pub(crate) use health::HealthCheck;
 use crate::validation::{ValidGenerateRequest, Validation, ValidationError};
 use crate::{
     ChatTemplateInputs, ChatTemplateVersions, FinishReason, GenerateRequest, HubProcessorConfig,
-    HubTokenizerConfig, Message, MessageChunk, PrefillToken, Text, TextMessage, Token,
+    HubTokenizerConfig, Message, MessageChunk, PrefillToken, TextMessage, Token,
 };
-use crate::{FunctionRef, FunctionsMap, GrammarType, Properties, Tool, ToolType, Tools};
+use crate::{
+    FunctionRef, FunctionsMap, GrammarType, Properties, TokenizerConfigToken, Tool, ToolType, Tools,
+};
 use futures::future::try_join_all;
 use minijinja::{Environment, ErrorKind, Template};
+use minijinja_contrib::pycompat;
+
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,14 +66,7 @@ impl Infer {
                     .find(|t| t.name == "default")
                     .map(|t| t.template),
             })
-            .map(|t| {
-                // .strip() is not supported in minijinja
-                // .capitalize() is not supported in minijinja but we can use | capitalize
-                let t = t
-                    .replace(".strip()", " | trim")
-                    .replace(".capitalize()", " | capitalize");
-                ChatTemplate::new(t, tokenizer_config.bos_token, tokenizer_config.eos_token)
-            });
+            .map(|t| ChatTemplate::new(t, tokenizer_config.bos_token, tokenizer_config.eos_token));
 
         // Inference limit with a semaphore
         let semaphore = Arc::new(Semaphore::new(max_concurrent_requests));
@@ -275,8 +272,14 @@ struct ChatTemplate {
 }
 
 impl ChatTemplate {
-    fn new(template: String, bos_token: Option<String>, eos_token: Option<String>) -> Self {
+    fn new(
+        template: String,
+        bos_token: Option<TokenizerConfigToken>,
+        eos_token: Option<TokenizerConfigToken>,
+    ) -> Self {
         let mut env = Box::new(Environment::new());
+        // enable things like .strip() or .capitalize()
+        env.set_unknown_method_callback(pycompat::unknown_method_callback);
         let template_str = template.into_boxed_str();
         env.add_function("raise_exception", raise_exception);
 
@@ -290,8 +293,8 @@ impl ChatTemplate {
 
         Self {
             template,
-            bos_token,
-            eos_token,
+            bos_token: bos_token.map(|token| token.as_str().to_string()),
+            eos_token: eos_token.map(|token| token.as_str().to_string()),
             use_default_tool_template,
         }
     }
@@ -304,9 +307,9 @@ impl ChatTemplate {
         if self.use_default_tool_template {
             if let Some(last_message) = messages.last_mut() {
                 if let Some((GrammarType::Json(tools), tool_prompt)) = grammar_with_prompt {
-                    last_message.content.push(MessageChunk::Text(Text {
+                    last_message.content.push(MessageChunk::Text {
                         text: format!("\n---\n{}\n{}", tool_prompt, tools),
-                    }));
+                    });
                 }
             }
         }
@@ -342,6 +345,14 @@ impl ToolGrammar {
                         .find(|tool| tool.function.name == *name)
                         .unwrap_or_else(|| panic!("Tool with name {} not found", name))
                         .clone()]
+                }
+                ToolType::Function { function } => {
+                    let tool = req_tools
+                        .iter()
+                        .find(|tool| tool.function.name == function.name)
+                        .unwrap_or_else(|| panic!("Tool with name {} not found", function.name))
+                        .clone();
+                    vec![tool]
                 }
                 ToolType::OneOf => req_tools.to_owned(),
             };

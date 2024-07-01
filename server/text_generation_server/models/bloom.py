@@ -83,13 +83,14 @@ class BLOOMSharded(CausalLM):
             process_group=self.process_group,
             prefix="transformer",
         )
-        if config.quantize == "gptq":
+        if config.quantize in ["gptq", "marlin"]:
             weights._set_gptq_params(model_id, revision)
 
         model = BloomForCausalLM(config, weights)
 
         torch.distributed.barrier(group=self.process_group)
         super(CausalLM, self).__init__(
+            model_id=model_id,
             model=model,
             tokenizer=tokenizer,
             requires_padding=True,

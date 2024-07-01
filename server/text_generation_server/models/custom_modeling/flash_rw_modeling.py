@@ -217,7 +217,7 @@ class FlashRWAttention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 query,
                 kv_cache[0],
@@ -340,7 +340,7 @@ class FlashRWLargeAttention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 query,
                 kv_cache[0],
@@ -672,6 +672,7 @@ class FlashRWForCausalLM(FlashRWPreTrainedModel):
         max_s: int,
         prefill_cache_indices: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
+        adapter_data: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids,

@@ -1,3 +1,4 @@
+from itertools import repeat
 import torch
 from PIL import Image
 from io import BytesIO
@@ -15,6 +16,9 @@ from text_generation_server.models.flash_mistral import (
 
 tracer = trace.get_tracer(__name__)
 
+IDEFICS2_FAKE_TOKEN = "<fake_token_around_image>"
+IDEFICS2_IMAGE_TOKEN = "<image>"
+
 
 def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
     """
@@ -22,7 +26,7 @@ def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
 
     Args:
         image_size (`tuple`):
-            The size of the input image in the format (width, height).
+            The size of the input image in the format (height, width).
         grid_pinpoints (`List`):
             A list containing possible resolutions. Each item in the list should be a tuple or list
             of the form `(height, width)`.
@@ -39,21 +43,21 @@ def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
     return height // patch_size, width // patch_size
 
 
-def image_text_replacement(image_input, config, image_id) -> str:
+def image_text_replacement(processor, image_input, config, image_id: int) -> str:
     if config.model_type == "idefics2":
-        # TODO technically depends on image splitting which is not implemented.
-        num_features = 320
-        return (
-            "<fake_token_around_image>"
-            + "<image>" * num_features
-            + "<fake_token_around_image>"
-        )
+        image_seq_len = 64
+        image_str = f"{IDEFICS2_FAKE_TOKEN}{IDEFICS2_IMAGE_TOKEN * image_seq_len}{IDEFICS2_FAKE_TOKEN}"
+        if processor.image_processor.do_image_splitting:
+            image_str *= 5
+        return image_str
     elif config.model_type == "llava_next":
         height, width = image_input["image_sizes"][image_id]
         num_features = get_number_of_features(height, width, config)
         from loguru import logger
 
-        logger.info(f"Found {num_features} in image of resolution {height}x{width}")
+        logger.info(
+            f"Found {num_features} features in image of resolution {height}x{width}"
+        )
         return "<image>" * num_features
 
     elif config.model_type == "paligemma":
@@ -62,20 +66,35 @@ def image_text_replacement(image_input, config, image_id) -> str:
         raise RuntimeError(f"Unknown config {config.model_type} for multimodal")
 
 
+def image_text_replacement_fixup(config, text: str) -> str:
+    if config.model_type == "idefics2":
+        return text.replace(
+            f"{IDEFICS2_FAKE_TOKEN}{IDEFICS2_FAKE_TOKEN}", IDEFICS2_FAKE_TOKEN
+        )
+    return text
+
+
 def get_unpadded_features(
-    height: int, width: int, npatches: int, num_patch_height: int, num_patch_width: int
+    original_height: int,
+    original_width: int,
+    npatches: int,
+    num_patch_height: int,
+    num_patch_width: int,
 ) -> Tuple[int, int]:
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
 
-    aspect_ratio: float = width / height
+    aspect_ratio: float = original_width / original_height
     current_aspect_ratio: float = current_width / current_height
+
     if aspect_ratio > current_aspect_ratio:
-        new_height = (height * current_width) // width
-        current_height = new_height
+        new_height = (original_height * current_width) // original_width
+        padding = (current_height - new_height) // 2
+        current_height = current_height - (2 * padding)
     else:
-        new_width = (width * current_height) // height
-        current_width = new_width
+        new_width = (original_width * current_height) // original_height
+        padding = (current_width - new_width) // 2
+        current_width = current_width - (2 * padding)
 
     unpadded_features = current_height * current_width
     newline_features = current_height
@@ -94,7 +113,9 @@ def get_number_of_features(height: int, width: int, config) -> int:
 
     npatches = image_size // patch_size
 
-    num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+    # Dimensions are intentionally swapped to be bug-compatible with
+    # upstream: https://github.com/LLaVA-VL/LLaVA-NeXT/issues/59
+    num_patch_width, num_patch_height = get_anyres_image_grid_shape(
         [height, width],
         image_grid_pinpoints,
         image_size,
@@ -133,23 +154,45 @@ class VlmCausalLMBatch(FlashCausalLMBatch):
     def batch_tokenized_inputs(
         cls, requests: Iterable[generate_pb2.Request], tokenizer, processor, config
     ):
+        # Process images first. We need all of them so that the processor
+        # can make the image splits the same size. And we need the final
+        # sizes to insert correct number of image tokens.
+        images = []
+        for r in requests:
+            for chunk in r.input_chunks.chunks:
+                chunk_type = chunk.WhichOneof("chunk")
+                if chunk_type == "text":
+                    pass
+                elif chunk_type == "image":
+                    image = Image.open(BytesIO(chunk.image.data))
+                    if config.model_type == "llava_next":
+                        images.append(image)
+                    else:
+                        images.append([image])
+                else:
+                    raise RuntimeError(f"Invalid chunk type {chunk_type}")
+
+        if images:
+            image_inputs = processor.image_processor(images, return_tensors="pt")
+        else:
+            image_inputs = None
+
         batch_inputs = []
-        image_inputs = []
         max_truncation = 0
+        image_id = 0
         for r in requests:
             full_text = ""
-            image_id = 0
             for chunk in r.input_chunks.chunks:
                 chunk_type = chunk.WhichOneof("chunk")
                 if chunk_type == "text":
                     full_text += chunk.text
                 elif chunk_type == "image":
-                    image = Image.open(BytesIO(chunk.image.data))
-                    image_input = processor.image_processor(image, return_tensors="pt")
-                    full_text += image_text_replacement(image_input, config, image_id)
-                    image_inputs.append(image_input)
-                else:
-                    raise RuntimeError(f"Invalid chunk type {chunk_type}")
+                    full_text += image_text_replacement(
+                        processor, image_inputs, config, image_id
+                    )
+                    image_id += 1
+
+            full_text = image_text_replacement_fixup(config, full_text)
 
             batch_inputs.append(full_text)
             max_truncation = max(max_truncation, r.truncate)
@@ -160,24 +203,7 @@ class VlmCausalLMBatch(FlashCausalLMBatch):
             max_length=max_truncation,
             add_special_tokens=not config.model_type == "paligemma",
         )["input_ids"]
-        if image_inputs:
-            image_input = image_inputs[0]
-            new_image_inputs = {
-                "pixel_values": torch.cat(
-                    [img["pixel_values"] for img in image_inputs], dim=0
-                ),
-            }
-            if "pixel_attention_mask" in image_input:
-                new_image_inputs["pixel_attention_mask"] = torch.cat(
-                    [img["pixel_attention_mask"] for img in image_inputs], dim=0
-                )
-            if "image_sizes" in image_input:
-                new_image_inputs["image_sizes"] = torch.cat(
-                    [img["image_sizes"] for img in image_inputs], dim=0
-                )
-            image_inputs = new_image_inputs
-        else:
-            image_inputs = None
+
         return batch_tokenized_inputs, image_inputs
 
     @classmethod
@@ -219,7 +245,9 @@ class VlmCausalLM(BaseFlashMistral):
         return VlmCausalLMBatch
 
     def forward(
-        self, batch: VlmCausalLMBatch
+        self,
+        batch: VlmCausalLMBatch,
+        adapter_data: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # Model Forward
         if batch.speculative_ids is not None:

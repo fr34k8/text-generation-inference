@@ -30,6 +30,7 @@ from text_generation_server.layers.attention import (
     attention,
     reshape_and_cache,
 )
+from text_generation_server.models.globals import FLASH_DECODING
 from text_generation_server.utils.import_utils import SYSTEM
 from text_generation_server.layers import (
     TensorParallelRowLinear,
@@ -166,7 +167,7 @@ def _load_gqa(config, prefix: str, weights):
         dim=0,
     )
 
-    if config.quantize not in ["gptq", "awq"]:
+    if config.quantize not in ["gptq", "awq", "marlin"]:
         weight = weight.to(dtype=weights.dtype).to(device=weights.device)
 
         head_size = config.hidden_size // config.num_attention_heads
@@ -259,8 +260,8 @@ class FlashCohereAttention(torch.nn.Module):
         cu_seqlen_prefill,
         kv_cache,
         block_tables,
-        slots,
         input_lengths,
+        slots,
         max_s,
     ):
         qkv = self.query_key_value(hidden_states)
@@ -304,7 +305,7 @@ class FlashCohereAttention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 query,
                 kv_cache[0],
@@ -464,6 +465,7 @@ class FlashCohereModel(torch.nn.Module):
         )
 
         residual = None
+
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
@@ -514,6 +516,7 @@ class FlashCohereForCausalLM(torch.nn.Module):
         max_s: int,
         prefill_cache_indices: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
+        adapter_data: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,

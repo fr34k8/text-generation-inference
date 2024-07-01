@@ -13,9 +13,11 @@ use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use text_generation_router::config::Config;
-use text_generation_router::{server, HubModelInfo, HubProcessorConfig, HubTokenizerConfig};
+use text_generation_router::{
+    server, HubModelInfo, HubPreprocessorConfig, HubProcessorConfig, HubTokenizerConfig,
+};
 use thiserror::Error;
-use tokenizers::Tokenizer;
+use tokenizers::{processors::template::TemplateProcessing, Tokenizer};
 use tower_http::cors::AllowOrigin;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -65,6 +67,8 @@ struct Args {
     json_output: bool,
     #[clap(long, env)]
     otlp_endpoint: Option<String>,
+    #[clap(default_value = "text-generation-inference.router", long, env)]
+    otlp_service_name: String,
     #[clap(long, env)]
     cors_allow_origin: Option<Vec<String>>,
     #[clap(long, env)]
@@ -107,6 +111,7 @@ async fn main() -> Result<(), RouterError> {
         validation_workers,
         json_output,
         otlp_endpoint,
+        otlp_service_name,
         cors_allow_origin,
         ngrok,
         ngrok_authtoken,
@@ -117,7 +122,7 @@ async fn main() -> Result<(), RouterError> {
     } = args;
 
     // Launch Tokio runtime
-    init_logging(otlp_endpoint, json_output);
+    init_logging(otlp_endpoint, otlp_service_name, json_output);
 
     // Validate args
     if max_input_tokens >= max_total_tokens {
@@ -156,7 +161,9 @@ async fn main() -> Result<(), RouterError> {
     });
 
     // Parse Huggingface hub token
-    let authorization_token = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
+    let authorization_token = std::env::var("HF_TOKEN")
+        .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
+        .ok();
 
     // Tokenizer instance
     // This will only be used to validate payloads
@@ -209,6 +216,7 @@ async fn main() -> Result<(), RouterError> {
         tokenizer_filename,
         config_filename,
         tokenizer_config_filename,
+        preprocessor_config_filename,
         processor_config_filename,
         model_info,
     ) = match api {
@@ -216,6 +224,7 @@ async fn main() -> Result<(), RouterError> {
             Some(local_path.join("tokenizer.json")),
             Some(local_path.join("config.json")),
             Some(local_path.join("tokenizer_config.json")),
+            Some(local_path.join("preprocessor_config.json")),
             Some(local_path.join("processor_config.json")),
             None,
         ),
@@ -232,6 +241,7 @@ async fn main() -> Result<(), RouterError> {
             };
             let config_filename = api_repo.get("config.json").await.ok();
             let tokenizer_config_filename = api_repo.get("tokenizer_config.json").await.ok();
+            let preprocessor_config_filename = api_repo.get("preprocessor_config.json").await.ok();
             let processor_config_filename = api_repo.get("processor_config.json").await.ok();
 
             let model_info = if let Some(model_info) = get_model_info(&api_repo).await {
@@ -244,6 +254,7 @@ async fn main() -> Result<(), RouterError> {
                 tokenizer_filename,
                 config_filename,
                 tokenizer_config_filename,
+                preprocessor_config_filename,
                 processor_config_filename,
                 model_info,
             )
@@ -258,13 +269,12 @@ async fn main() -> Result<(), RouterError> {
                 repo.get("tokenizer.json"),
                 repo.get("config.json"),
                 repo.get("tokenizer_config.json"),
+                repo.get("preprocessor_config.json"),
                 repo.get("processor_config.json"),
                 None,
             )
         }
     };
-    let tokenizer: Option<Tokenizer> =
-        tokenizer_filename.and_then(|filename| Tokenizer::from_file(filename).ok());
     let config: Option<Config> = config_filename.and_then(|filename| {
         std::fs::read_to_string(filename)
             .ok()
@@ -295,6 +305,23 @@ async fn main() -> Result<(), RouterError> {
         HubTokenizerConfig::default()
     });
 
+    let tokenizer: Option<Tokenizer> = tokenizer_filename.and_then(|filename| {
+        let mut tokenizer = Tokenizer::from_file(filename).ok();
+        if let Some(tokenizer) = &mut tokenizer {
+            if let Some(class) = &tokenizer_config.tokenizer_class {
+                if class == "LlamaTokenizer" || class == "LlamaTokenizerFast"{
+                    if let Ok(post_processor) = create_post_processor(tokenizer, &tokenizer_config) {
+                        tracing::info!("Overriding LlamaTokenizer with TemplateProcessing to follow python override defined in https://github.com/huggingface/transformers/blob/4aa17d00690b7f82c95bb2949ea57e22c35b4336/src/transformers/models/llama/tokenization_llama_fast.py#L203-L205");
+                        tokenizer.with_post_processor(post_processor);
+                    }
+                }
+            }
+        }
+        tokenizer
+    });
+
+    let preprocessor_config =
+        preprocessor_config_filename.and_then(HubPreprocessorConfig::from_file);
     let processor_config = processor_config_filename
         .and_then(HubProcessorConfig::from_file)
         .unwrap_or_default();
@@ -356,6 +383,7 @@ async fn main() -> Result<(), RouterError> {
         ngrok_authtoken,
         ngrok_edge,
         tokenizer_config,
+        preprocessor_config,
         processor_config,
         messages_api_enabled,
         disable_grammar_support,
@@ -367,10 +395,11 @@ async fn main() -> Result<(), RouterError> {
 
 /// Init logging using env variables LOG_LEVEL and LOG_FORMAT:
 ///     - otlp_endpoint is an optional URL to an Open Telemetry collector
+///     - otlp_service_name service name to appear in APM
 ///     - LOG_LEVEL may be TRACE, DEBUG, INFO, WARN or ERROR (default to INFO)
 ///     - LOG_FORMAT may be TEXT or JSON (default to TEXT)
 ///     - LOG_COLORIZE may be "false" or "true" (default to "true" or ansi supported platforms)
-fn init_logging(otlp_endpoint: Option<String>, json_output: bool) {
+fn init_logging(otlp_endpoint: Option<String>, otlp_service_name: String, json_output: bool) {
     let mut layers = Vec::new();
 
     // STDOUT/STDERR layer
@@ -401,7 +430,7 @@ fn init_logging(otlp_endpoint: Option<String>, json_output: bool) {
                 trace::config()
                     .with_resource(Resource::new(vec![KeyValue::new(
                         "service.name",
-                        "text-generation-inference.router",
+                        otlp_service_name,
                     )]))
                     .with_sampler(Sampler::AlwaysOn),
             )
@@ -498,6 +527,77 @@ pub async fn get_tokenizer_config(api_repo: &ApiRepo) -> Option<HubTokenizerConf
     Some(tokenizer_config)
 }
 
+/// Create a post_processor for the LlamaTokenizer
+pub fn create_post_processor(
+    tokenizer: &Tokenizer,
+    tokenizer_config: &HubTokenizerConfig,
+) -> Result<TemplateProcessing, tokenizers::processors::template::TemplateProcessingBuilderError> {
+    let add_bos_token = tokenizer_config.add_bos_token.unwrap_or(true);
+    let add_eos_token = tokenizer_config.add_eos_token.unwrap_or(false);
+
+    let bos_token = tokenizer_config.bos_token.as_ref();
+    let eos_token = tokenizer_config.eos_token.as_ref();
+
+    if add_bos_token && bos_token.is_none() {
+        panic!("add_bos_token = true but bos_token is None");
+    }
+
+    if add_eos_token && eos_token.is_none() {
+        panic!("add_eos_token = true but eos_token is None");
+    }
+
+    let mut single = Vec::new();
+    let mut pair = Vec::new();
+    let mut special_tokens = Vec::new();
+
+    if add_bos_token {
+        if let Some(bos) = bos_token {
+            let bos_token_id = tokenizer
+                .token_to_id(bos.as_str())
+                .expect("Should have found the bos token id");
+            special_tokens.push((bos.as_str(), bos_token_id));
+            single.push(format!("{}:0", bos.as_str()));
+            pair.push(format!("{}:0", bos.as_str()));
+        }
+    }
+
+    single.push("$A:0".to_string());
+    pair.push("$A:0".to_string());
+
+    if add_eos_token {
+        if let Some(eos) = eos_token {
+            let eos_token_id = tokenizer
+                .token_to_id(eos.as_str())
+                .expect("Should have found the eos token id");
+            special_tokens.push((eos.as_str(), eos_token_id));
+            single.push(format!("{}:0", eos.as_str()));
+            pair.push(format!("{}:0", eos.as_str()));
+        }
+    }
+
+    if add_bos_token {
+        if let Some(bos) = bos_token {
+            pair.push(format!("{}:1", bos.as_str()));
+        }
+    }
+
+    pair.push("$B:1".to_string());
+
+    if add_eos_token {
+        if let Some(eos) = eos_token {
+            pair.push(format!("{}:1", eos.as_str()));
+        }
+    }
+
+    let post_processor = TemplateProcessing::builder()
+        .try_single(single)?
+        .try_pair(pair)?
+        .special_tokens(special_tokens)
+        .build()?;
+
+    Ok(post_processor)
+}
+
 #[derive(Debug, Error)]
 enum RouterError {
     #[error("Argument validation error: {0}")]
@@ -506,4 +606,38 @@ enum RouterError {
     WebServer(#[from] server::WebServerError),
     #[error("Tokio runtime failed to start: {0}")]
     Tokio(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use text_generation_router::TokenizerConfigToken;
+
+    #[test]
+    fn test_create_post_processor() {
+        let tokenizer_config = HubTokenizerConfig {
+            add_bos_token: None,
+            add_eos_token: None,
+            bos_token: Some(TokenizerConfigToken::String("<s>".to_string())),
+            eos_token: Some(TokenizerConfigToken::String("</s>".to_string())),
+            chat_template: None,
+            tokenizer_class: None,
+            completion_template: None,
+        };
+
+        let tokenizer =
+            Tokenizer::from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0", None).unwrap();
+        let post_processor = create_post_processor(&tokenizer, &tokenizer_config).unwrap();
+
+        let expected = TemplateProcessing::builder()
+            .try_single("<s>:0 $A:0")
+            .unwrap()
+            .try_pair("<s>:0 $A:0 <s>:1 $B:1")
+            .unwrap()
+            .special_tokens(vec![("<s>".to_string(), 1)])
+            .build()
+            .unwrap();
+
+        assert_eq!(post_processor, expected);
+    }
 }

@@ -168,7 +168,7 @@ class FlashNeoxAttention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 qkv[:, 0],
                 kv_cache[0],
@@ -390,6 +390,7 @@ class FlashGPTNeoXForCausalLM(FlashGPTNeoXPreTrainedModel):
         max_s: int,
         prefill_cache_indices: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
+        adapter_data: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.gpt_neox(
             input_ids,

@@ -17,6 +17,8 @@
     title: Supported Models and Hardware
   - local: messages_api
     title: Messages API
+  - local: architecture
+    title: Internal Architecture
   title: Getting started
 - sections:
   - local: basic_tutorials/consuming_tgi
@@ -58,6 +60,9 @@
   - local: conceptual/speculation
     title: Speculation (Medusa, ngram)
   - local: conceptual/guidance
-    title: How Guidance Works (via outlines)
+    title: How Guidance Works (via outlines
+  - local: conceptual/lora
+    title: LoRA (Low-Rank Adaptation)
+
 
   title: Conceptual Guides

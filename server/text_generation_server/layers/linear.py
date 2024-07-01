@@ -166,35 +166,45 @@ def get_linear(weight, bias, quantize):
 
     elif quantize == "gptq":
         from text_generation_server.layers.gptq import GPTQWeight
+        from text_generation_server.layers.marlin import (
+            GPTQMarlinLinear,
+            GPTQMarlinWeight,
+        )
 
-        if not isinstance(weight, GPTQWeight):
+        if isinstance(weight, GPTQMarlinWeight):
+            linear = GPTQMarlinLinear(
+                weight=weight,
+                bias=bias,
+            )
+        elif isinstance(weight, GPTQWeight):
+            if weight.use_exllama:
+                try:
+                    from text_generation_server.layers.gptq import (
+                        ExllamaQuantLinear,
+                    )
+                except ImportError:
+                    raise NotImplementedError(
+                        f"Exllama gptq kernels are not installed. Install them `cd server/exllama_kernels && python setup.py install && cd ../exllamav2_kernels && python setup.py install`"
+                    )
+
+                linear = ExllamaQuantLinear(weight, bias)
+            else:
+                from text_generation_server.layers.gptq.quant_linear import QuantLinear
+
+                linear = QuantLinear(
+                    weight.qweight,
+                    weight.qzeros,
+                    weight.scales,
+                    weight.g_idx,
+                    bias,
+                    weight.bits,
+                    weight.groupsize,
+                )
+        else:
             raise NotImplementedError(
                 f"The passed weight is not `gptq` compatible, loader needs to be updated."
             )
 
-        if weight.use_exllama:
-            try:
-                from text_generation_server.layers.gptq import (
-                    ExllamaQuantLinear,
-                )
-            except ImportError:
-                raise NotImplementedError(
-                    f"Exllama gptq kernels are not installed. Install them `cd server/exllama_kernels && python setup.py install && cd ../exllamav2_kernels && python setup.py install`"
-                )
-
-            linear = ExllamaQuantLinear(weight, bias)
-        else:
-            from text_generation_server.layers.gptq.quant_linear import QuantLinear
-
-            linear = QuantLinear(
-                weight.qweight,
-                weight.qzeros,
-                weight.scales,
-                weight.g_idx,
-                bias,
-                weight.bits,
-                weight.groupsize,
-            )
     elif quantize == "awq":
         from text_generation_server.layers.gptq import GPTQWeight
 
@@ -216,20 +226,31 @@ def get_linear(weight, bias, quantize):
                 qweight=weight.qweight,
                 qzeros=weight.qzeros,
                 scales=weight.scales,
-                bias=bias is not None,
+                bias=bias,
             )
         except ImportError:
             raise NotImplementedError(
                 "You do not seem to have awq installed, either install it (cd server &&  make install-awq), or try using GPTQ `---quantize gptq` a conversion AWQ->GPTQ will happen on the fly"
             )
     elif quantize == "marlin":
-        from text_generation_server.layers.marlin import MarlinLinear, MarlinWeight
+        from text_generation_server.layers.marlin import (
+            GPTQMarlin24Linear,
+            GPTQMarlin24Weight,
+            MarlinLinear,
+            MarlinWeight,
+        )
 
-        if not isinstance(weight, MarlinWeight):
+        if isinstance(weight, GPTQMarlin24Weight):
+            linear = GPTQMarlin24Linear(
+                weight=weight,
+                bias=bias,
+            )
+        elif isinstance(weight, MarlinWeight):
+            linear = MarlinLinear(weight=weight, bias=bias)
+        else:
             raise NotImplementedError(
                 f"The passed weight is not `marlin` compatible, loader needs to be updated."
             )
-        linear = MarlinLinear(B=weight.B, s=weight.s, bias=bias)
     else:
         raise NotImplementedError(f"Quantization `{quantize}` is not implemented yet.")
     return linear

@@ -245,7 +245,7 @@ class FlashGemmaAttention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 query,
                 kv_cache[0],
@@ -375,8 +375,6 @@ class FlashGemmaModel(torch.nn.Module):
             prefix=f"{prefix}.norm", weights=weights, eps=config.rms_norm_eps
         )
 
-        self.gradient_checkpointing = False
-
         self.head_size = self.layers[0].self_attn.head_size
         self.num_heads = self.layers[0].self_attn.num_heads
         self.num_key_value_heads = self.layers[0].self_attn.num_key_value_heads
@@ -460,6 +458,7 @@ class FlashGemmaForCausalLM(torch.nn.Module):
         max_s: int,
         prefill_cache_indices: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
+        adapter_data: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_embeds = self.embed_tokens(input_ids)
         hidden_states = self.model(

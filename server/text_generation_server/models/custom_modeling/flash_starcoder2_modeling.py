@@ -130,7 +130,7 @@ def _load_gqa(config, prefix: str, weights):
         dim=0,
     )
 
-    if config.quantize not in ["gptq", "awq"]:
+    if config.quantize not in ["gptq", "awq", "marlin"]:
         weight = weight.to(dtype=weights.dtype).to(device=weights.device)
 
         head_size = config.hidden_size // config.num_attention_heads
@@ -255,7 +255,7 @@ class Starcoder2Attention(torch.nn.Module):
             )
         # Decode
         else:
-            paged_attention(
+            attn_output = paged_attention(
                 attn_output,
                 query,
                 kv_cache[0],
@@ -525,6 +525,7 @@ class FlashStarcoder2ForCausalLM(torch.nn.Module):
         max_s: int,
         prefill_cache_indices: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
+        adapter_data: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         true_max_s = max_s
         if prefill_cache_indices is not None:

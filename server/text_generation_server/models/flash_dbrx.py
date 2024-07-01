@@ -80,13 +80,14 @@ class FlashDbrx(FlashCausalLM):
 
         filenames = weight_files(model_id, revision=revision, extension=".safetensors")
         weights = Weights(filenames, device, dtype, process_group=self.process_group)
-        if config.quantize in ["gptq", "awq"]:
+        if config.quantize in ["gptq", "awq", "marlin"]:
             weights._set_gptq_params(model_id, revision)
 
         model = FlashDbrxForCausalLM(config, weights)
 
         torch.distributed.barrier(group=self.process_group)
         super(FlashDbrx, self).__init__(
+            model_id=model_id,
             model=model,
             tokenizer=tokenizer,
             num_layers=len(model.model.layers),
